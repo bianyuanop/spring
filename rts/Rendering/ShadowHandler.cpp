@@ -26,7 +26,6 @@
 #include "System/StringUtil.h"
 #include "System/Log/ILog.h"
 
-#define SHADOWMATRIX_NONLINEAR 0
 #define SHADOWGEN_PER_FRAGMENT 1 // only for maps
 
 CONFIG(int, Shadows).defaultValue(2).headlessValue(-1).minimumValue(-1).safemodeValue(-1).description("Sets whether shadows are rendered.\n-1:=forceoff, 0:=off, 1:=full, 2:=fast (skip terrain)"); //FIXME document bitmask
@@ -48,7 +47,7 @@ void CShadowHandler::Reload(const char* argv)
 	if (nextShadowConfig == shadowConfig && nextShadowMapSize == shadowMapSize && nextShadowProMode == shadowProMode)
 		return;
 
-	configHandler->Set("Shadows", nextShadowConfig & 0xF);
+	configHandler->Set("Shadows", nextShadowConfig & 0xFF);
 	configHandler->Set("ShadowMapSize", Clamp(nextShadowMapSize, int(MIN_SHADOWMAP_SIZE), int(MAX_SHADOWMAP_SIZE)));
 	configHandler->Set("ShadowProjectionMode", Clamp(nextShadowProMode, int(SHADOWPROMODE_MAP_CENTER), int(SHADOWPROMODE_MIX_CAMMAP)));
 
@@ -63,16 +62,14 @@ void CShadowHandler::Init()
 
 	shadowConfig  = configHandler->GetInt("Shadows");
 	shadowMapSize = configHandler->GetInt("ShadowMapSize");
-	// disabled; other option usually produces worse resolution
-	// shadowProMode = configHandler->GetInt("ShadowProjectionMode");
-	shadowProMode = SHADOWPROMODE_CAM_CENTER;
+	shadowProMode = configHandler->GetInt("ShadowProjectionMode");
 	shadowGenBits = SHADOWGEN_BIT_NONE;
 
 	shadowsLoaded = false;
 	inShadowPass = false;
 
-	shadowTexture = 0;
-	dummyColorTexture = 0;
+	shadowDepthTexture = 0;
+	shadowColorTexture = 0;
 
 	if (!tmpFirstInit && !shadowsSupported)
 		return;
@@ -87,7 +84,7 @@ void CShadowHandler::Init()
 	}
 
 	if (shadowConfig > 0)
-		shadowGenBits = SHADOWGEN_BIT_MODEL | SHADOWGEN_BIT_MAP | SHADOWGEN_BIT_PROJ | SHADOWGEN_BIT_TREE;
+		shadowGenBits = SHADOWGEN_BIT_MODEL | SHADOWGEN_BIT_MAP | SHADOWGEN_BIT_PROJ | SHADOWGEN_BIT_TREE | SHADOWGEN_BIT_COLOR;
 
 	if (shadowConfig > 1)
 		shadowGenBits &= (~shadowConfig);
@@ -114,9 +111,9 @@ void CShadowHandler::Init()
 	}
 
 
-	if (!InitDepthTarget()) {
-		// free any resources allocated by InitDepthTarget()
-		FreeTextures();
+	if (!InitFBOAndTextures()) {
+		// free any resources allocated by InitFBOAndTextures()
+		FreeFBOAndTextures();
 
 		LOG_L(L_ERROR, "[%s] failed to initialize depth-texture FBO", __func__);
 		return;
@@ -126,8 +123,8 @@ void CShadowHandler::Init()
 		shadowsSupported = true;
 
 	if (shadowConfig == 0) {
-		// free any resources allocated by InitDepthTarget()
-		FreeTextures();
+		// free any resources allocated by InitFBOAndTextures()
+		FreeFBOAndTextures();
 
 		// shadowsLoaded is still false
 		return;
@@ -139,7 +136,7 @@ void CShadowHandler::Init()
 
 void CShadowHandler::Kill()
 {
-	FreeTextures();
+	FreeFBOAndTextures();
 	shaderHandler->ReleaseProgramObjects("[ShadowHandler]");
 	shadowGenProgs.fill(nullptr);
 }
@@ -150,12 +147,11 @@ void CShadowHandler::Update()
 	CCamera* playCam = CCameraHandler::GetCamera(CCamera::CAMTYPE_PLAYER);
 	CCamera* shadCam = CCameraHandler::GetCamera(CCamera::CAMTYPE_SHADOW);
 
-	SetShadowMapSizeFactors();
 	SetShadowMatrix(playCam, shadCam);
 	SetShadowCamera(shadCam);
 }
 
-void CShadowHandler::FreeTextures() {
+void CShadowHandler::FreeFBOAndTextures() {
 	if (shadowMapFBO.IsValid()) {
 		shadowMapFBO.Bind();
 		shadowMapFBO.DetachAll();
@@ -164,8 +160,8 @@ void CShadowHandler::FreeTextures() {
 
 	shadowMapFBO.Kill();
 
-	glDeleteTextures(1, &shadowTexture    ); shadowTexture     = 0;
-	glDeleteTextures(1, &dummyColorTexture); dummyColorTexture = 0;
+	glDeleteTextures(1, &shadowDepthTexture); shadowDepthTexture = 0;
+	glDeleteTextures(1, &shadowColorTexture); shadowColorTexture = 0;
 }
 
 
@@ -222,7 +218,7 @@ void CShadowHandler::LoadShadowGenShaders()
 		"#version " + IntToString(globalRendering->supportFragDepthLayout? 420: 130) + "\n",
 	};
 	static const std::string extraDefs =
-		("#define SHADOWMATRIX_NONLINEAR " + IntToString(SHADOWMATRIX_NONLINEAR) + "\n") +
+		("#define SHADOWMATRIX_NONLINEAR " + std::string("0 \n")) +
 		("#define SHADOWGEN_PER_FRAGMENT " + IntToString(SHADOWGEN_PER_FRAGMENT) + "\n") +
 		("#define SUPPORT_CLIP_CONTROL " + IntToString(globalRendering->supportClipSpaceControl) + "\n") +
 		("#define SUPPORT_DEPTH_LAYOUT " + IntToString(globalRendering->supportFragDepthLayout) + "\n");
@@ -291,12 +287,8 @@ void CShadowHandler::LoadShadowGenShaders()
 
 
 
-bool CShadowHandler::InitDepthTarget()
+bool CShadowHandler::InitFBOAndTextures()
 {
-	// this can be enabled for debugging
-	// it turns the shadow render buffer in a buffer with color
-	constexpr bool useColorTexture = false;
-
 	// shadowMapFBO is no-op constructed, has to be initialized manually
 	shadowMapFBO.Init(false);
 
@@ -305,106 +297,85 @@ bool CShadowHandler::InitDepthTarget()
 		return false;
 	}
 
-	glGenTextures(1, &shadowTexture);
-	glBindTexture(GL_TEXTURE_2D, shadowTexture);
-	constexpr float one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-	glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, one);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); // shadowtex linear sampling is for-free on NVidias
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	// TODO: add bit depth?
+	static constexpr struct {
+		GLint clampMode;
+		GLint filterMode;
+		const char* name;
+	} presets[] = {
+		{GL_CLAMP_TO_BORDER, GL_LINEAR , "SHADOW-BEST"  },
+		{GL_CLAMP_TO_EDGE  , GL_NEAREST, "SHADOW-COMPAT"},
+	};
 
-	if (useColorTexture) {
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, shadowMapSize, shadowMapSize, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+	attachColor = (shadowGenBits & SHADOWGEN_BIT_COLOR) != 0;
 
-		shadowMapFBO.Bind();
-		shadowMapFBO.AttachTexture(shadowTexture);
+	bool status = false;
+	for (const auto& preset : presets)
+	{
+		if (FBO::GetCurrentBoundFBO() == shadowMapFBO.GetId())
+			shadowMapFBO.DetachAll();
 
-		glDrawBuffer(GL_COLOR_ATTACHMENT0_EXT);
-		glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);
-	} else {
-		GLint depthFormat = static_cast<GLint>(CGlobalRendering::DepthBitsToFormat(globalRendering->supportDepthBufferBitDepth));
+		//depth
+		glDeleteTextures(1, &shadowDepthTexture);
+		glGenTextures(1, &shadowDepthTexture);
+		glBindTexture(GL_TEXTURE_2D, shadowDepthTexture);
+		constexpr float one[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, one);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, presets->clampMode);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, presets->clampMode);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, presets->filterMode);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, presets->filterMode);
+
+		const int depthBits = std::min(globalRendering->supportDepthBufferBitDepth, 24);
+		const GLint depthFormat = CGlobalRendering::DepthBitsToFormat(depthBits);
 
 		glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_LUMINANCE);
 		glTexImage2D(GL_TEXTURE_2D, 0, depthFormat, shadowMapSize, shadowMapSize, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
 
+		/// color
+		glDeleteTextures(1, &shadowColorTexture);
+		glGenTextures(1, &shadowColorTexture);
+		glBindTexture(GL_TEXTURE_2D, shadowColorTexture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL , 0); //no mips
+
+		if (attachColor) {
+			// for now init only single channel, such that shadow intensity could be stored here
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, shadowMapSize, shadowMapSize, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+		}
+		else {
+			// make a dummy texture, so Lua binding returns something sane
+			static constexpr uint8_t dummyColor = 255;
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 1, 1, 0, GL_RED, GL_UNSIGNED_BYTE, &dummyColor);
+		}
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+
 		// Mesa complains about an incomplete FBO if calling Bind before TexImage (?)
 		shadowMapFBO.Bind();
-		shadowMapFBO.AttachTexture(shadowTexture, GL_TEXTURE_2D, GL_DEPTH_ATTACHMENT_EXT);
+		shadowMapFBO.AttachTexture(shadowDepthTexture, GL_TEXTURE_2D, GL_DEPTH_ATTACHMENT);
 
-		glDrawBuffer(GL_NONE);
-		// glReadBuffer() only works with color buffers
+		if (attachColor) {
+			shadowMapFBO.AttachTexture(shadowColorTexture, GL_TEXTURE_2D, GL_COLOR_ATTACHMENT0);
+
+			glDrawBuffer(GL_COLOR_ATTACHMENT0);
+			glReadBuffer(GL_COLOR_ATTACHMENT0);
+		}
+		else {
+			glDrawBuffer(GL_NONE);
+			//glReadBuffer(); not needed
+		}
+
+		// test the FBO
+		status = shadowMapFBO.CheckStatus(presets->name);
+
+		if (status) //exit on the first occasion
+			break;
 	}
-
-	// test the FBO
-	bool status = shadowMapFBO.CheckStatus("SHADOW");
-
-	if (!status && !useColorTexture)
-		status = WorkaroundUnsupportedFboRenderTargets();
 
 	shadowMapFBO.Unbind();
 	return status;
 }
-
-
-bool CShadowHandler::WorkaroundUnsupportedFboRenderTargets()
-{
-	bool status = false;
-
-	// some drivers/GPUs fail to render to GL_CLAMP_TO_BORDER (and GL_LINEAR may cause a drop in performance for them, too)
-	{
-		shadowMapFBO.Detach(GL_DEPTH_ATTACHMENT_EXT);
-		glDeleteTextures(1, &shadowTexture);
-
-		glGenTextures(1, &shadowTexture);
-		glBindTexture(GL_TEXTURE_2D, shadowTexture);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-		const int depthBits = std::min(globalRendering->supportDepthBufferBitDepth, 24);
-		const GLint texFormat = CGlobalRendering::DepthBitsToFormat(depthBits);
-
-		glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_LUMINANCE);
-		glTexImage2D(GL_TEXTURE_2D, 0, texFormat, shadowMapSize, shadowMapSize, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-
-		shadowMapFBO.AttachTexture(shadowTexture, GL_TEXTURE_2D, GL_DEPTH_ATTACHMENT_EXT);
-
-		if (shadowMapFBO.CheckStatus("SHADOW-GL_CLAMP_TO_EDGE"))
-			return true;
-	}
-
-
-	// ATI sometimes fails without an attached color texture, so check a few formats (not all supported texture formats are renderable)
-	{
-		glDrawBuffer(GL_COLOR_ATTACHMENT0_EXT);
-		glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);
-
-		// 1st: try the smallest unsupported format (4bit per pixel)
-		glGenTextures(1, &dummyColorTexture);
-		glBindTexture(GL_TEXTURE_2D, dummyColorTexture);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA4, shadowMapSize, shadowMapSize, 0, GL_ALPHA, GL_UNSIGNED_BYTE, nullptr);
-
-		shadowMapFBO.AttachTexture(dummyColorTexture);
-
-		if (shadowMapFBO.CheckStatus("SHADOW-GL_ALPHA4"))
-			return true;
-
-		// failed revert changes of 1st attempt
-		shadowMapFBO.Detach(GL_COLOR_ATTACHMENT0_EXT);
-		glDeleteTextures(1, &dummyColorTexture);
-
-		// 2nd: try smallest standard format that must be renderable for OGL3
-		shadowMapFBO.CreateRenderBuffer(GL_COLOR_ATTACHMENT0_EXT, GL_RED, shadowMapSize, shadowMapSize);
-
-		if (shadowMapFBO.CheckStatus("SHADOW-GL_RED"))
-			return true;
-	}
-
-	return status;
-}
-
 
 void CShadowHandler::DrawShadowPasses()
 {
@@ -449,36 +420,6 @@ void CShadowHandler::DrawShadowPasses()
 
 	inShadowPass = false;
 }
-
-void CShadowHandler::SetShadowMapSizeFactors()
-{
-	#if (SHADOWMATRIX_NONLINEAR == 1)
-	// note: depends on CalcMinMaxView(), which is no longer called
-	const float shadowMapX =              std::sqrt( std::fabs(shadowProjMinMax.y) ); // math::sqrt( |x2| )
-	const float shadowMapY =              std::sqrt( std::fabs(shadowProjMinMax.w) ); // math::sqrt( |y2| )
-	const float shadowMapW = shadowMapX + std::sqrt( std::fabs(shadowProjMinMax.x) ); // math::sqrt( |x2| ) + math::sqrt( |x1| )
-	const float shadowMapH = shadowMapY + std::sqrt( std::fabs(shadowProjMinMax.z) ); // math::sqrt( |y2| ) + math::sqrt( |y1| )
-
-	shadowTexProjCenter.x = 1.0f - (shadowMapX / shadowMapW);
-	shadowTexProjCenter.y = 1.0f - (shadowMapY / shadowMapH);
-
-	if (shadowMapSize >= 2048) {
-		shadowTexProjCenter.z =  0.01f;
-		shadowTexProjCenter.w = -0.1f;
-	} else {
-		shadowTexProjCenter.z =  0.0025f;
-		shadowTexProjCenter.w = -0.05f;
-	}
-	#else
-	// .xy are used to bias the SM-space projection; the values
-	// of .z and .w are such that (invsqrt(xy + zz) + ww) ~= 1
-	shadowTexProjCenter.x = 0.5f;
-	shadowTexProjCenter.y = 0.5f;
-	shadowTexProjCenter.z = FLT_MAX;
-	shadowTexProjCenter.w = 1.0f;
-	#endif
-}
-
 
 static CMatrix44f ComposeLightMatrix(const ISkyLight* light)
 {
@@ -577,10 +518,10 @@ void CShadowHandler::SetShadowCamera(CCamera* shadowCam)
 }
 
 
-void CShadowHandler::SetupShadowTexSampler(unsigned int texUnit, bool enable) const
+void CShadowHandler::SetupShadowTexSampler(uint32_t texUnit, bool enable) const
 {
 	glActiveTexture(texUnit);
-	glBindTexture(GL_TEXTURE_2D, shadowTexture);
+	glBindTexture(GL_TEXTURE_2D, shadowDepthTexture);
 
 	// support FFP context
 	if (enable)
@@ -598,7 +539,7 @@ void CShadowHandler::SetupShadowTexSamplerRaw() const
 	// glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_ALPHA);
 }
 
-void CShadowHandler::ResetShadowTexSampler(unsigned int texUnit, bool disable) const
+void CShadowHandler::ResetShadowTexSampler(uint32_t texUnit, bool disable) const
 {
 	glActiveTexture(texUnit);
 	glBindTexture(GL_TEXTURE_2D, 0);
@@ -631,10 +572,12 @@ void CShadowHandler::CreateShadows()
 
 	glShadeModel(GL_FLAT);
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+	const GLboolean colorMaskR = attachColor ? GL_TRUE : GL_FALSE;
+	glColorMask(colorMaskR, GL_FALSE, GL_FALSE, GL_FALSE);
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
-	glClear(GL_DEPTH_BUFFER_BIT);
+	glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+	glClear(GL_DEPTH_BUFFER_BIT | (attachColor * GL_COLOR_BUFFER_BIT));
 
 
 	//flickers without it. Why?
@@ -794,7 +737,7 @@ float CShadowHandler::GetOrthoProjectedFrustumRadius(CCamera* cam, const CMatrix
 		projPos = CalcShadowProjectionPos(cam, &frustumPoints[0]);
 
 		// calculate radius of the minimally-bounding sphere around projected frustum
-		for (unsigned int n = 0; n < 8; n++) {
+		for (uint32_t n = 0; n < 8; n++) {
 			sqRadius = std::max(sqRadius, (frustumPoints[n] - projPos).SqLength());
 		}
 
@@ -815,7 +758,7 @@ float CShadowHandler::GetOrthoProjectedFrustumRadius(CCamera* cam, const CMatrix
 		float2 xbounds = {std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
 		float2 zbounds = {std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
 
-		for (unsigned int n = 0; n < 8; n++) {
+		for (uint32_t n = 0; n < 8; n++) {
 			frustumPoints[n] = frustumProjMat * frustumPoints[n];
 
 			xbounds.x = std::min(xbounds.x, frustumPoints[n].x);

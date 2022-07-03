@@ -11,6 +11,8 @@ in Data {
 	vec4 uvCoord;
 };
 
+out float shadowDensity;
+
 bool AlphaDiscard(float a) {
 	float alphaTestGT = float(a > alphaCtrl.x) * alphaCtrl.y;
 	float alphaTestLT = float(a < alphaCtrl.x) * alphaCtrl.z;
@@ -21,4 +23,6 @@ bool AlphaDiscard(float a) {
 void main() {
 	if (AlphaDiscard(texture(tex2, uvCoord.xy).a))
 		discard;
+
+	shadowDensity = 0.0;
 }

@@ -24,9 +24,9 @@ public:
 	void Reload(const char* argv);
 	void Update();
 
-	void SetupShadowTexSampler(unsigned int texUnit, bool enable = false) const;
+	void SetupShadowTexSampler(uint32_t texUnit, bool enable = false) const;
 	void SetupShadowTexSamplerRaw() const;
-	void ResetShadowTexSampler(unsigned int texUnit, bool disable = false) const;
+	void ResetShadowTexSampler(uint32_t texUnit, bool disable = false) const;
 	void ResetShadowTexSamplerRaw() const;
 	void CreateShadows();
 
@@ -36,6 +36,7 @@ public:
 		SHADOWGEN_BIT_MODEL = 4,
 		SHADOWGEN_BIT_PROJ  = 8,
 		SHADOWGEN_BIT_TREE  = 16,
+		SHADOWGEN_BIT_COLOR = 128,
 	};
 	enum ShadowProjectionMode {
 		SHADOWPROMODE_MAP_CENTER = 0, // use center of map-geometry as projection target (constant res.)
@@ -67,35 +68,34 @@ public:
 		return shadowGenProgs[p];
 	}
 
-	const CMatrix44f& GetShadowMatrix   (unsigned int idx = SHADOWMAT_TYPE_DRAWING) const { return  viewMatrix[idx];      }
-	const      float* GetShadowMatrixRaw(unsigned int idx = SHADOWMAT_TYPE_DRAWING) const { return &viewMatrix[idx].m[0]; }
+	const CMatrix44f& GetShadowMatrix   (uint32_t idx = SHADOWMAT_TYPE_DRAWING) const { return  viewMatrix[idx];      }
+	const      float* GetShadowMatrixRaw(uint32_t idx = SHADOWMAT_TYPE_DRAWING) const { return &viewMatrix[idx].m[0]; }
 
-	const CMatrix44f& GetShadowViewMatrix(unsigned int idx = SHADOWMAT_TYPE_DRAWING) const { return  viewMatrix[idx]; }
-	const CMatrix44f& GetShadowProjMatrix(unsigned int idx = SHADOWMAT_TYPE_DRAWING) const { return  projMatrix[idx]; }
-	const      float* GetShadowViewMatrixRaw(unsigned int idx = SHADOWMAT_TYPE_DRAWING) const { return &viewMatrix[idx].m[0]; }
-	const      float* GetShadowProjMatrixRaw(unsigned int idx = SHADOWMAT_TYPE_DRAWING) const { return &projMatrix[idx].m[0]; }
+	const CMatrix44f& GetShadowViewMatrix(uint32_t idx = SHADOWMAT_TYPE_DRAWING) const { return  viewMatrix[idx]; }
+	const CMatrix44f& GetShadowProjMatrix(uint32_t idx = SHADOWMAT_TYPE_DRAWING) const { return  projMatrix[idx]; }
+	const      float* GetShadowViewMatrixRaw(uint32_t idx = SHADOWMAT_TYPE_DRAWING) const { return &viewMatrix[idx].m[0]; }
+	const      float* GetShadowProjMatrixRaw(uint32_t idx = SHADOWMAT_TYPE_DRAWING) const { return &projMatrix[idx].m[0]; }
 
-	const float4& GetShadowParams() const { return shadowTexProjCenter; }
+	uint32_t GetShadowTextureID() const { return shadowDepthTexture; }
+	uint32_t GetColorTextureID() const { return shadowColorTexture; }
 
-	unsigned int GetShadowTextureID() const { return shadowTexture; }
-	unsigned int GetColorTextureID() const { return dummyColorTexture; }
+	bool GetAttachColor() const { return attachColor; }
 
 	static bool ShadowsInitialized() { return firstInit; }
 	static bool ShadowsSupported() { return shadowsSupported; }
 
 	bool ShadowsLoaded() const { return shadowsLoaded; }
 	bool InShadowPass() const { return inShadowPass; }
-private:
-	void FreeTextures();
 
-	bool InitDepthTarget();
-	bool WorkaroundUnsupportedFboRenderTargets();
+	static const float4& GetShadowParams() { return shadowTexProjCenter; }
+private:
+	void FreeFBOAndTextures();
+	bool InitFBOAndTextures();
 
 	void DrawShadowPasses();
 	void LoadProjectionMatrix(const CCamera* shadowCam);
 	void LoadShadowGenShaders();
 
-	void SetShadowMapSizeFactors();
 	void SetShadowMatrix(CCamera* playerCam, CCamera* shadowCam);
 	void SetShadowCamera(CCamera* shadowCam);
 
@@ -112,11 +112,13 @@ public:
 	int shadowProMode;
 
 private:
-	unsigned int shadowTexture;
-	unsigned int dummyColorTexture;
+	uint32_t shadowDepthTexture;
+	uint32_t shadowColorTexture;
 
 	bool shadowsLoaded = false;
 	bool inShadowPass = false;
+
+	bool attachColor = false;
 
 	inline static bool firstInit = true;
 	inline static bool shadowsSupported = false;
@@ -132,13 +134,19 @@ private:
 	/// frustum bounding-rectangle corners; x1, x2, y1, y2
 	float4 shadowProjMinMax;
 	/// xmid, ymid, p17, p18
-	float4 shadowTexProjCenter;
 
 	// culling and drawing versions of both matrices
 	CMatrix44f projMatrix[2];
 	CMatrix44f viewMatrix[2];
 
 	FBO shadowMapFBO;
+
+	static inline float4 shadowTexProjCenter = {
+		0.5f,
+		0.5f,
+		FLT_MAX,
+		1.0f
+	};
 };
 
 extern CShadowHandler shadowHandler;
