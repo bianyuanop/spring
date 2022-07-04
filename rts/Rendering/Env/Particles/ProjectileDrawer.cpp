@@ -800,15 +800,17 @@ void CProjectileDrawer::Draw(bool drawReflection, bool drawRefraction) {
 
 void CProjectileDrawer::DrawShadowPass()
 {
-	Shader::IProgramObject* po = shadowHandler.GetShadowGenProg(CShadowHandler::SHADOWGEN_PROGRAM_PROJECTILE);
+	Shader::IProgramObject* po1 = shadowHandler.GetShadowGenProg(CShadowHandler::SHADOWGEN_PROGRAM_PROJECTILE);
+	Shader::IProgramObject* po2 = shadowHandler.GetShadowGenProg(CShadowHandler::SHADOWGEN_PROGRAM_PARTICLE);
 
-	glPushAttrib(GL_ENABLE_BIT);
-	glDisable(GL_TEXTURE_2D);
-	po->Enable();
+	//glPushAttrib(GL_ENABLE_BIT);
+	glActiveTexture(GL_TEXTURE0); textureAtlas->BindTexture();
+	glColor4f(1.0f, 1.0f, 1.0f, 0.2f);
 
 	fxVA = GetVertexArray();
 	fxVA->Initialize();
 
+	po1->Enable();
 	{
 		for (int modelType = MODELTYPE_3DO; modelType < MODELTYPE_CNT; modelType++) {
 			DrawProjectilesShadow(modelType);
@@ -817,22 +819,20 @@ void CProjectileDrawer::DrawShadowPass()
 		// draw the model-less projectiles
 		DrawProjectilesSetShadow(renderProjectiles);
 	}
+	po1->Disable();
 
 	if (fxVA->drawIndex() > 0) {
-		glEnable(GL_TEXTURE_2D);
-		glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-		glAlphaFunc(GL_GREATER, 0.3f);
-		glEnable(GL_ALPHA_TEST);
-		glShadeModel(GL_SMOOTH);
-		// glDisable(GL_CULL_FACE);
+		po2->Enable();
 
-		textureAtlas->BindTexture();
+		glShadeModel(GL_SMOOTH);
 		fxVA->DrawArrayTC(GL_QUADS);
+
+		po2->Disable();
 	}
 
-	po->Disable();
 	glShadeModel(GL_FLAT);
-	glPopAttrib();
+	glBindTexture(GL_TEXTURE_2D, 0);
+	//glPopAttrib();
 }
 
 

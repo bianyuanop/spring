@@ -194,6 +194,7 @@ void CShadowHandler::LoadShadowGenShaders()
 		"ARB/treeShadow.vp",
 		"ARB/treeFarShadow.vp",
 		"ARB/projectileshadow.vp",
+		"ARB/projectileshadow.vp",
 	};
 	static const std::string shadowGenProgHandles[SHADOWGEN_PROGRAM_LAST] = {
 		"ShadowGenShaderProgModel",
@@ -202,6 +203,7 @@ void CShadowHandler::LoadShadowGenShaders()
 		"ShadowGenshaderProgTreeNear",
 		"ShadowGenshaderProgTreeDist",
 		"ShadowGenshaderProgProjectile",
+		"ShadowGenshaderProgParticle",
 	};
 	static const std::string shadowGenProgDefines[SHADOWGEN_PROGRAM_LAST] = {
 		"#define SHADOWGEN_PROGRAM_MODEL\n",
@@ -210,15 +212,15 @@ void CShadowHandler::LoadShadowGenShaders()
 		"#define SHADOWGEN_PROGRAM_TREE_NEAR\n",
 		"#define SHADOWGEN_PROGRAM_TREE_DIST\n",
 		"#define SHADOWGEN_PROGRAM_PROJECTILE\n",
+		"#define SHADOWGEN_PROGRAM_PARTICLE\n",
 	};
 
 	// #version has to be added here because it is conditional
-	static const std::string versionDefs[2] = {
+	static const std::string versionDefs[] = {
 		"#version 130\n",
-		"#version " + IntToString(globalRendering->supportFragDepthLayout? 420: 130) + "\n",
+		"#version " + std::string(globalRendering->supportFragDepthLayout ? "150 compatibility \n" : "130\n"),
 	};
 	static const std::string extraDefs =
-		("#define SHADOWMATRIX_NONLINEAR " + std::string("0 \n")) +
 		("#define SHADOWGEN_PER_FRAGMENT " + IntToString(SHADOWGEN_PER_FRAGMENT) + "\n") +
 		("#define SUPPORT_CLIP_CONTROL " + IntToString(globalRendering->supportClipSpaceControl) + "\n") +
 		("#define SUPPORT_DEPTH_LAYOUT " + IntToString(globalRendering->supportFragDepthLayout) + "\n");
@@ -230,12 +232,8 @@ void CShadowHandler::LoadShadowGenShaders()
 
 			Shader::IProgramObject* po = sh->CreateProgramObject("[ShadowHandler]", shadowGenProgHandles[i] + "GLSL", false);
 
-			if (i == SHADOWGEN_PROGRAM_MAP) {
-				po->AttachShaderObject(sh->CreateShaderObject("GLSL/ShadowGenVertProg.glsl", versionDefs[0] + shadowGenProgDefines[i] + extraDefs, GL_VERTEX_SHADER));
-				po->AttachShaderObject(sh->CreateShaderObject("GLSL/ShadowGenFragProg.glsl", versionDefs[1] + shadowGenProgDefines[i] + extraDefs, GL_FRAGMENT_SHADER));
-			} else {
-				po->AttachShaderObject(sh->CreateShaderObject("GLSL/ShadowGenVertProg.glsl", versionDefs[0] + shadowGenProgDefines[i] + extraDefs, GL_VERTEX_SHADER));
-			}
+			po->AttachShaderObject(sh->CreateShaderObject("GLSL/ShadowGenVertProg.glsl", versionDefs[0] + shadowGenProgDefines[i] + extraDefs, GL_VERTEX_SHADER));
+			po->AttachShaderObject(sh->CreateShaderObject("GLSL/ShadowGenFragProg.glsl", versionDefs[1] + shadowGenProgDefines[i] + extraDefs, GL_FRAGMENT_SHADER));
 
 			po->Link();
 			po->SetUniformLocation("shadowParams"); // idx 0
@@ -336,6 +334,8 @@ bool CShadowHandler::InitFBOAndTextures()
 		glDeleteTextures(1, &shadowColorTexture);
 		glGenTextures(1, &shadowColorTexture);
 		glBindTexture(GL_TEXTURE_2D, shadowColorTexture);
+		constexpr float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, zero);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL , 0); //no mips
 
@@ -385,19 +385,31 @@ void CShadowHandler::DrawShadowPasses()
 		glEnable(GL_CULL_FACE);
 		glCullFace(GL_BACK);
 
-			eventHandler.DrawWorldShadow();
+		if (attachColor) {
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+			glDepthFunc(GL_ALWAYS);
+		}
 
-			if ((shadowGenBits & SHADOWGEN_BIT_TREE) != 0) {
-				grassDrawer->DrawShadow();
-			}
+		eventHandler.DrawWorldShadow();
 
-			if ((shadowGenBits & SHADOWGEN_BIT_PROJ) != 0)
-				projectileDrawer->DrawShadowPass();
+		if ((shadowGenBits & SHADOWGEN_BIT_PROJ) != 0) {
+			projectileDrawer->DrawShadowPass();
+		}
 
-			if ((shadowGenBits & SHADOWGEN_BIT_MODEL) != 0) {
-				unitDrawer->DrawShadowPass();
-				featureDrawer->DrawShadowPass();
-			}
+		if ((shadowGenBits & SHADOWGEN_BIT_TREE) != 0)
+			grassDrawer->DrawShadow();
+
+		if ((shadowGenBits & SHADOWGEN_BIT_MODEL) != 0) {
+			unitDrawer->DrawShadowPass();
+			featureDrawer->DrawShadowPass();
+		}
+
+		if (attachColor) {
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDisable(GL_BLEND);
+			glDepthFunc(GL_LEQUAL);
+		}
 
 		// cull front-faces during the terrain shadow pass: sun direction
 		// can be set so oblique that geometry back-faces are visible (eg.
@@ -409,13 +421,12 @@ void CShadowHandler::DrawShadowPasses()
 		// (could just disable culling of terrain faces entirely, but we
 		// also want to prevent overdraw in low-angle passes)
 		// glCullFace(GL_FRONT);
+		if ((shadowGenBits & SHADOWGEN_BIT_MAP) != 0)
+			readMap->GetGroundDrawer()->DrawShadowPass();
 
 		// Restore GL_BACK culling, because Lua shadow materials might
 		// have changed culling at their own discretion
 		glCullFace(GL_BACK);
-			if ((shadowGenBits & SHADOWGEN_BIT_MAP) != 0)
-				readMap->GetGroundDrawer()->DrawShadowPass();
-
 	glPopAttrib();
 
 	inShadowPass = false;
@@ -574,11 +585,12 @@ void CShadowHandler::CreateShadows()
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 	const GLboolean colorMaskR = attachColor ? GL_TRUE : GL_FALSE;
 	glColorMask(colorMaskR, GL_FALSE, GL_FALSE, GL_FALSE);
+
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
-	glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
-	glClear(GL_DEPTH_BUFFER_BIT | (attachColor * GL_COLOR_BUFFER_BIT));
 
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_DEPTH_BUFFER_BIT | (attachColor * GL_COLOR_BUFFER_BIT));
 
 	//flickers without it. Why?
 	SetShadowCamera(CCameraHandler::GetCamera(CCamera::CAMTYPE_SHADOW));
@@ -612,7 +624,6 @@ void CShadowHandler::CreateShadows()
 
 	CCameraHandler::SetActiveCamera(prvCam->GetCamType());
 	prvCam->Update();
-
 
 	glShadeModel(GL_SMOOTH);
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);

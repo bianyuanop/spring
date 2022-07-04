@@ -223,6 +223,7 @@ void SMFRenderStateGLSL::Update(
 			glslShaders[n]->SetUniform("splatDetailNormalTex2", 16);
 			glslShaders[n]->SetUniform("splatDetailNormalTex3", 17);
 			glslShaders[n]->SetUniform("splatDetailNormalTex4", 18);
+			glslShaders[n]->SetUniform("shadowColorTex"       , 19);
 
 			glslShaders[n]->SetUniform("mapSizePO2", mapDims.pwr2mapx * SQUARE_SIZE * 1.0f, mapDims.pwr2mapy * SQUARE_SIZE * 1.0f);
 			glslShaders[n]->SetUniform("mapSize",    mapDims.mapx     * SQUARE_SIZE * 1.0f, mapDims.mapy     * SQUARE_SIZE * 1.0f);
@@ -512,8 +513,10 @@ void SMFRenderStateGLSL::Enable(const CSMFGroundDrawer* smfGroundDrawer, const D
 	mLightHandler->Update(glslShaders[GLSL_SHADER_CURRENT]);
 	glMultMatrixf(camera->GetViewMatrix());
 
-	if (shadowHandler.ShadowsLoaded())
+	if (shadowHandler.ShadowsLoaded()) {
 		shadowHandler.SetupShadowTexSampler(GL_TEXTURE4);
+		glActiveTexture(GL_TEXTURE19); glBindTexture(GL_TEXTURE_2D, shadowHandler.GetColorTextureID());
+	}
 
 	glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, smfMap->GetDetailTexture());
 	glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, smfMap->GetNormalsTexture());

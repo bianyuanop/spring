@@ -64,6 +64,7 @@ varying vec2 diffuseTexCoords;
 
 #ifdef HAVE_SHADOWS
 	uniform sampler2DShadow shadowTex;
+	uniform sampler2D shadowColorTex;
 	uniform mat4 shadowMat;
 	uniform vec4 shadowParams;
 #endif
@@ -407,8 +408,8 @@ void main() {
 			vertexShadowPos.xy *= (inversesqrt(abs(vertexShadowPos.xy) + shadowParams.zz) + shadowParams.ww);
 			vertexShadowPos.xy += shadowParams.xy;
 
-		// same as ARB shader: shadowCoeff = 1 - (1 - shadowCoeff) * groundShadowDensity
-		shadowCoeff = mix(1.0, shadow2DProj(shadowTex, vertexShadowPos).r, groundShadowDensity);
+		float fragShadowDensity = texture(shadowColorTex, vertexShadowPos.xy).x;
+		shadowCoeff = mix(1.0, shadow2DProj(shadowTex, vertexShadowPos).r, groundShadowDensity * fragShadowDensity);
 	}
 	#endif
 
